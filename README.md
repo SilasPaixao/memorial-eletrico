@@ -37,3 +37,11 @@ npm run tauri dev
 
 ## Responsabilidade técnica
 Não usar este protótipo como projeto aprovado, laudo, ART/TRT, nem para selecionar automaticamente cabos, disjuntores ou medição. Profissional habilitado deve validar dados e regras técnicas vigentes.
+
+## Atualização 0.2.0
+- Rendimento e FP por linha de carga, inicialmente discretos e bloqueados; clique no lápis para editar.
+- Motores: rendimento 90% e FP 0,85; iluminação: FP 0,92 (rendimento não aplicável).
+- Migração dos dados antigos salvos localmente.
+- Exportações usam diálogo nativo Salvar como no Tauri (PDF, DOCX e backup JSON). PDF é gerado sem pop-up.
+- O PDF e o DOCX são sempre RASCUNHO.
+- **A compilação Windows ainda precisa ser executada/testada no GitHub Actions.**
