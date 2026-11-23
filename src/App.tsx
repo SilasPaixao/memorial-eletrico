@@ -11,7 +11,7 @@ type EditableLoad = Load & {efficiency?:number;powerFactor?:number;demandFactor?
 function defaultParameters(l:Load):EditableLoad {
  const motor=l.category.toLowerCase().includes("motor")||l.unit==="CV"||l.unit==="HP";
  const lighting=l.category.toLowerCase().includes("ilumina");
- return {...l,efficiency:motor?90:undefined,powerFactor:motor?0.85:lighting?0.92:undefined,demandFactor:lighting?100:undefined};
+ return {...l,efficiency:lighting?undefined:90,powerFactor:lighting?0.92:0.85,demandFactor:lighting?100:undefined};
 }
 
 
@@ -71,7 +71,13 @@ async function saveBlob(blob:Blob,name:string,filterName:string,extension:string
  await saveBytes(new Uint8Array(await blob.arrayBuffer()),name,filterName,extension);
 }
 async function imageBytes():Promise<Uint8Array>{return new Uint8Array(await (await fetch(crtImage)).arrayBuffer())}
-function groupLoads(loads:EditableLoad[],motor:boolean){return loads.filter(l=>motor?(l.category.toLowerCase().includes("motor")||l.unit==="CV"||l.unit==="HP"):l.category.toLowerCase().includes("ilumina"))}
+function groupLoads(loads:EditableLoad[],motor:boolean){return loads.filter(l=>motor?isMotor(l):isLighting(l))}
+function otherLoads(loads:EditableLoad[]){return loads.filter(l=>!isMotor(l)&&!isLighting(l))}
+function lightingDescription(l:EditableLoad){
+ const description=l.description.trim();
+ if(!description || description.toLowerCase()==="iluminação")return l.quantity===1?"ponto de iluminação":"pontos de iluminação";
+ return description.toLowerCase();
+}
 function money(n:number){return n.toLocaleString("pt-BR",{maximumFractionDigits:2})}
 function powerKw(l:EditableLoad){const factor:Record<Unit,number>={W:0.001,kW:1,CV:0.7355,HP:0.7457,VA:0.001,kVA:1};return l.quantity*l.power*factor[l.unit]}
 function num(n:number,digits=2){return n.toLocaleString("pt-BR",{minimumFractionDigits:digits,maximumFractionDigits:digits})}
@@ -110,7 +116,7 @@ function calculationDetails(loads:EditableLoad[]):string[]{
  }
  for(const l of lights){
   const c=powerKw(l),fd=(l.demandFactor??100)/100,fp=l.powerFactor??0;
-  lines.push(`Para ${l.quantity} ${l.description.toLowerCase()} com carga de ${num(c)} kW.`);
+  lines.push(`Para ${l.quantity} ${lightingDescription(l)} com carga total de ${num(c)} kW.`);
   lines.push(`Fd = Fator de Demanda para Iluminação (parâmetro estimado/editável) = ${param(l.demandFactor??100)}%.`);
   lines.push(`FpI (fator de potência para iluminação) = ${param(fp)}.`);
   if(fd>=0&&fd<=1&&fp>0&&fp<=1){const demand=c*fd/fp;lines.push('Dm = (C × Fd) / FpI');lines.push(`Dm = (${num(c)} × ${param(fd)}) / ${param(fp)} = ${num(demand)} kVA.`);lines.push(`Potência reativa estimada na demanda: Q = √(Dm² − (C × Fd)²) = ${num(Math.sqrt(Math.max(0,demand**2-(c*fd)**2)))} kvar.`)}
@@ -137,6 +143,17 @@ export function App(){
  const restoreSections=()=>{const next={...defaultSections};setSections(next);localStorage.setItem("memorial-modelo-secoes-v1",JSON.stringify(next))};
  const set=(patch:Partial<Project>)=>setP(old=>{const next={...old,...patch};localStorage.setItem("memorial-eletrico-v1",JSON.stringify(next));return next});
  const patch=(id:string,change:Partial<EditableLoad>)=>set({loads:p.loads.map(x=>x.id===id?{...x,...change}:x)});
+ const toggleParameters=(load:EditableLoad)=>{
+  if(editing.includes(load.id)){setEditing(old=>old.filter(id=>id!==load.id));return}
+  // Existing materials saved by older versions may not have FP or efficiency.
+  const suggested=defaultParameters(load);
+  const patchValues:Partial<EditableLoad>={};
+  if(load.powerFactor===undefined)patchValues.powerFactor=suggested.powerFactor;
+  if(load.efficiency===undefined&&!isLighting(load))patchValues.efficiency=90;
+  if(isLighting(load)&&load.demandFactor===undefined)patchValues.demandFactor=100;
+  if(Object.keys(patchValues).length)patch(load.id,patchValues);
+  setEditing(old=>[...old,load.id]);
+ };
  const calculations=useMemo(()=>p.loads.map(load=>{
   try{return {load,result:calculate(load,load.efficiency===undefined?undefined:load.efficiency/100,load.powerFactor)}}
   catch(e){return {load,error:String(e)}}
@@ -155,9 +172,10 @@ export function App(){
    new Paragraph({children:[new TextRun({text:`INSTALAÇÃO ELÉTRICA – ALIMENTAÇÃO ${p.supply.toUpperCase()}`,bold:true})],alignment:AlignmentType.CENTER,spacing:{after:420}}),
    heading("1. IDENTIFICAÇÃO DO CONSUMIDOR"),para(`Titular: ${p.consumer||"(não informado)"}`),para(`CPF: ${p.cpf||"(não informado)"}`),para(`Endereço: ${p.address||"(não informado)"}`),
    heading("2. OBJETIVO"),para(`Este memorial apresenta a relação de cargas prevista para atendimento do consumidor identificado, por meio de fornecimento ${p.supply.toLowerCase()}.`),
-   heading("3. RELAÇÃO DE CARGA INSTALADA"),heading("3.1 MOTORES"),tableFor(motor),
-   heading("3.2 ILUMINAÇÃO"),tableFor(lights),
-   ...calculationDetails(p.loads).map(para),
+   heading("3. RELAÇÃO DE CARGA INSTALADA"),
+   ...(motor.length?[heading("3.1 MOTORES"),tableFor(motor),heading("Memória de cálculo — Motores"),...calculationDetails(motor).map(para)]:[]),
+   ...(lights.length?[heading("3.2 ILUMINAÇÃO"),tableFor(lights),heading("Memória de cálculo — Iluminação"),...calculationDetails(lights).map(para)]:[]),
+   ...(otherLoads(p.loads).length?[heading("3.3 OUTROS EQUIPAMENTOS"),tableFor(otherLoads(p.loads)),...otherLoads(p.loads).flatMap(l=>[heading(`Memória de cálculo — ${l.description}`),...calculationDetails([l]).map(para)])]:[]),
    heading("4. DADOS TÉCNICOS DA ENTRADA DE ENERGIA"),
    ...sectionKeys.flatMap(key=>key.startsWith("4.")?[heading(key),...sections[key].split("\n").map(para)]:[]),
    ...sectionKeys.flatMap(key=>key.startsWith("4.")?[]:[heading(key),...sections[key].split("\n").map(para)]),
@@ -180,9 +198,11 @@ export function App(){
   line("MEMORIAL DESCRITIVO",{bold:true,center:true,gap:5});line(`INSTALAÇÃO ELÉTRICA – ALIMENTAÇÃO ${p.supply.toUpperCase()}`,{bold:true,center:true,gap:12});
   h("1. IDENTIFICAÇÃO DO CONSUMIDOR");line(`Titular: ${p.consumer||"(não informado)"}`);line(`CPF: ${p.cpf||"(não informado)"}`);line(`Endereço: ${p.address||"(não informado)"}`);
   h("2. OBJETIVO");line(`Este memorial apresenta a relação de cargas prevista para atendimento do consumidor identificado, por meio de fornecimento ${p.supply.toLowerCase()}.`);
-  h("3. RELAÇÃO DE CARGA INSTALADA");h("3.1 MOTORES");table(groupLoads(p.loads,true));
-  h("3.2 ILUMINAÇÃO");table(groupLoads(p.loads,false));
-  for(const detail of calculationDetails(p.loads))line(detail);
+  h("3. RELAÇÃO DE CARGA INSTALADA");
+  const motors=groupLoads(p.loads,true),lighting=groupLoads(p.loads,false),others=otherLoads(p.loads);
+  if(motors.length){h("3.1 MOTORES");table(motors);h("Memória de cálculo — Motores");for(const detail of calculationDetails(motors))line(detail)}
+  if(lighting.length){h("3.2 ILUMINAÇÃO");table(lighting);h("Memória de cálculo — Iluminação");for(const detail of calculationDetails(lighting))line(detail)}
+  if(others.length){h("3.3 OUTROS EQUIPAMENTOS");table(others);for(const material of others){h(`Memória de cálculo — ${material.description}`);for(const detail of calculationDetails([material]))line(detail)}}
   h("4. DADOS TÉCNICOS DA ENTRADA DE ENERGIA");
   for(const key of sectionKeys){if(key.startsWith("4.")){h(key);for(const part of sections[key].split("\n"))line(part)}}
   for(const key of sectionKeys){if(!key.startsWith("4.")){h(key);for(const part of sections[key].split("\n"))line(part)}}
@@ -207,10 +227,10 @@ export function App(){
  <section><h2>2. Cargas</h2><p>Rendimento, fator de potência e fator de demanda são parâmetros estimados/editáveis. Clique no lápis da linha para editá-los.</p><div className="scroll"><table><thead><tr><th>Descrição</th><th>Categoria</th><th>Quantidade</th><th>Potência</th><th>Unidade</th><th>Rend. (%)</th><th>FP</th><th>Fd (%)</th><th>Ações</th></tr></thead><tbody>{p.loads.map(l=>{
  const unlocked=editing.includes(l.id);
  return <tr key={l.id}><td><input value={l.description} onChange={e=>patch(l.id,{description:e.target.value})}/></td><td><input value={l.category} onChange={e=>patch(l.id,{category:e.target.value})}/></td><td><input type="number" min="1" step="1" value={l.quantity} onChange={e=>patch(l.id,{quantity:Number(e.target.value)})}/></td><td><input type="number" min="0.01" value={l.power} onChange={e=>patch(l.id,{power:Number(e.target.value)})}/></td><td><select value={l.unit} onChange={e=>patch(l.id,{unit:e.target.value as Unit})}>{(["W","kW","CV","HP","VA","kVA"] as Unit[]).map(u=><option key={u}>{u}</option>)}</select></td>
- <td><input aria-label={"Rendimento de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0.01" max="100" step="0.1" placeholder="—" disabled={!unlocked||l.efficiency===undefined} value={l.efficiency??""} onChange={e=>patch(l.id,{efficiency:Number(e.target.value)})}/></td>
- <td><input aria-label={"FP de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0.01" max="1" step="0.01" placeholder="—" disabled={!unlocked||l.powerFactor===undefined} value={l.powerFactor??""} onChange={e=>patch(l.id,{powerFactor:Number(e.target.value)})}/></td>
- <td><input aria-label={"Fator de demanda de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0" max="100" step="1" placeholder="—" disabled={!unlocked||l.demandFactor===undefined} value={l.demandFactor??""} onChange={e=>patch(l.id,{demandFactor:Number(e.target.value)})}/></td>
- <td><div className="actions"><button title={unlocked?"Concluir edição":"Editar parâmetros"} onClick={()=>setEditing(old=>unlocked?old.filter(id=>id!==l.id):[...old,l.id])}>{unlocked?"✓":"✎"}</button><button onClick={()=>set({loads:p.loads.filter(x=>x.id!==l.id)})}>Remover</button></div></td></tr>})}</tbody></table></div>
+ <td><input aria-label={"Rendimento de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0.01" max="100" step="0.1" placeholder="—" disabled={!unlocked||isLighting(l)} value={l.efficiency??""} onChange={e=>patch(l.id,{efficiency:Number(e.target.value)})}/></td>
+ <td><input aria-label={"FP de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0.01" max="1" step="0.01" placeholder="—" disabled={!unlocked} value={l.powerFactor??""} onChange={e=>patch(l.id,{powerFactor:Number(e.target.value)})}/></td>
+ <td><input aria-label={"Fator de demanda de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0" max="100" step="1" placeholder="—" disabled={!unlocked||!isLighting(l)} value={l.demandFactor??""} onChange={e=>patch(l.id,{demandFactor:Number(e.target.value)})}/></td>
+ <td><div className="actions"><button title={unlocked?"Concluir edição":"Editar parâmetros"} onClick={()=>toggleParameters(l)}>{unlocked?"✓":"✎"}</button><button onClick={()=>set({loads:p.loads.filter(x=>x.id!==l.id)})}>Remover</button></div></td></tr>})}</tbody></table></div>
  <button onClick={()=>set({loads:[...p.loads,defaultParameters({id:crypto.randomUUID(),description:"Novo equipamento",category:"Outros",quantity:1,power:1,unit:"W"})]})}>+ Adicionar equipamento</button></section>
  <section><h2>3. Textos do modelo (seções 4 a 8)</h2>
  <p>Os textos abaixo são os valores iniciais do modelo.pdf. Edite e salve para reutilizá-los em novos documentos. Confira os dados técnicos de cada instalação antes de exportar.</p>

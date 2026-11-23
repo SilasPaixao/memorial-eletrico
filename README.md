@@ -37,3 +37,7 @@ npm run tauri dev
 
 ## Responsabilidade técnica
 Não usar este protótipo como projeto aprovado, laudo, ART/TRT, nem para selecionar automaticamente cabos, disjuntores ou medição. Profissional habilitado deve validar dados e regras técnicas vigentes.
+
+
+## Versão 0.6.0
+Memórias de cálculo agrupadas por categoria e equipamento, com títulos em negrito no PDF e DOCX. Novos equipamentos recebem rendimento estimado de 90% e FP 0,85, editáveis no lápis; iluminação conserva FP 0,92 e Fd 100%.
