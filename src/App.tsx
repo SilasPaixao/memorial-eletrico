@@ -7,11 +7,11 @@ import { jsPDF } from "jspdf";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { isTauri } from "@tauri-apps/api/core";
-type EditableLoad = Load & {efficiency?:number;powerFactor?:number};
+type EditableLoad = Load & {efficiency?:number;powerFactor?:number;demandFactor?:number};
 function defaultParameters(l:Load):EditableLoad {
  const motor=l.category.toLowerCase().includes("motor")||l.unit==="CV"||l.unit==="HP";
  const lighting=l.category.toLowerCase().includes("ilumina");
- return {...l,efficiency:motor?90:undefined,powerFactor:motor?0.85:lighting?0.92:undefined};
+ return {...l,efficiency:motor?90:undefined,powerFactor:motor?0.85:lighting?0.92:undefined,demandFactor:lighting?100:undefined};
 }
 
 
@@ -73,6 +73,60 @@ async function saveBlob(blob:Blob,name:string,filterName:string,extension:string
 async function imageBytes():Promise<Uint8Array>{return new Uint8Array(await (await fetch(crtImage)).arrayBuffer())}
 function groupLoads(loads:EditableLoad[],motor:boolean){return loads.filter(l=>motor?(l.category.toLowerCase().includes("motor")||l.unit==="CV"||l.unit==="HP"):l.category.toLowerCase().includes("ilumina"))}
 function money(n:number){return n.toLocaleString("pt-BR",{maximumFractionDigits:2})}
+function powerKw(l:EditableLoad){const factor:Record<Unit,number>={W:0.001,kW:1,CV:0.7355,HP:0.7457,VA:0.001,kVA:1};return l.quantity*l.power*factor[l.unit]}
+function num(n:number,digits=2){return n.toLocaleString("pt-BR",{minimumFractionDigits:digits,maximumFractionDigits:digits})}
+function param(n:number){return n.toLocaleString("pt-BR",{maximumFractionDigits:4})}
+function isMotor(l:EditableLoad){return l.unit==="CV"||l.unit==="HP"||l.category.toLowerCase().includes("motor")}
+function isLighting(l:EditableLoad){return l.category.toLowerCase().includes("ilumina")}
+function calculationDetails(loads:EditableLoad[]):string[]{
+ const lines:string[]=[];
+ const motors=loads.filter(isMotor),lights=loads.filter(isLighting),others=loads.filter(l=>!isMotor(l)&&!isLighting(l));
+ if(motors.length){
+  const allCV=motors.every(l=>l.unit==="CV");const totalCV=allCV?motors.reduce((a,l)=>a+l.quantity*l.power,0):undefined;
+  const mechanical=motors.reduce((a,l)=>a+powerKw(l),0);
+  if(totalCV!==undefined)lines.push(`Conversão: ${param(totalCV)} × 0,7355 = ${num(mechanical)} kW`);
+  else lines.push(`Potência mecânica nominal total dos motores: ${num(mechanical)} kW (conversões: 1 CV = 0,7355 kW; 1 HP = 0,7457 kW).`);
+  const sameEta=motors.every(l=>l.efficiency===motors[0].efficiency),sameFp=motors.every(l=>l.powerFactor===motors[0].powerFactor);
+  if(sameEta&&sameFp&&motors[0].efficiency&&motors[0].powerFactor){
+   const eta=motors[0].efficiency/100,fp=motors[0].powerFactor;
+   const active=mechanical/eta,apparent=active/fp;
+   lines.push(`Rendimento estimado: ${param(motors[0].efficiency)}%`);
+   lines.push(`Fator de potência: ${param(fp)}`);
+   lines.push(`A potência total nominal dos motores corresponde a ${totalCV!==undefined?param(totalCV)+" CV, equivalente a aproximadamente ":"aproximadamente "}${num(mechanical)} kW de potência mecânica. Considerando rendimento estimado de ${param(motors[0].efficiency)}% e fator de potência de ${param(fp)}, obtém-se uma potência aparente estimada de ${num(apparent)} kVA.`);
+   lines.push(`Potência ativa estimada: P = ${num(mechanical)} / ${param(eta)} = ${num(active)} kW.`);
+   lines.push(`Potência aparente estimada: S = P / FP = ${num(active)} / ${param(fp)} = ${num(apparent)} kVA.`);
+   lines.push(`Potência reativa estimada: Q = √(S² − P²) = ${num(Math.sqrt(Math.max(0,apparent**2-active**2)))} kvar.`);
+  }else{
+   lines.push('Parâmetros de rendimento e fator de potência considerados individualmente por equipamento:');
+   for(const l of motors){
+    const eta=(l.efficiency??0)/100,fp=l.powerFactor??0,pmech=powerKw(l);
+    if(!(eta>0&&eta<=1&&fp>0&&fp<=1)){lines.push(`${l.description} (${l.quantity} × ${param(l.power)} ${l.unit}): rendimento ou fator de potência não informado.`);continue}
+    const active=pmech/eta,apparent=active/fp;
+    lines.push(`${l.description} (${l.quantity} × ${param(l.power)} ${l.unit}): rendimento estimado ${param(l.efficiency!)}%; fator de potência ${param(fp)}; P = ${num(pmech)} / ${param(eta)} = ${num(active)} kW; S = ${num(active)} / ${param(fp)} = ${num(apparent)} kVA; Q = ${num(Math.sqrt(Math.max(0,apparent**2-active**2)))} kvar.`);
+   }
+   const entries=motors.filter(l=>l.efficiency&&l.powerFactor).map(l=>{const active=powerKw(l)/(l.efficiency!/100);return {active,reactive:active*Math.sqrt(1/(l.powerFactor!**2)-1)}});
+   if(entries.length===motors.length){const active=entries.reduce((a,x)=>a+x.active,0),reactive=entries.reduce((a,x)=>a+x.reactive,0);lines.push(`Totais dos motores: P = ${num(active)} kW; Q = ${num(reactive)} kvar; S = √(P² + Q²) = ${num(Math.hypot(active,reactive))} kVA.`)}
+  }
+ }
+ for(const l of lights){
+  const c=powerKw(l),fd=(l.demandFactor??100)/100,fp=l.powerFactor??0;
+  lines.push(`Para ${l.quantity} ${l.description.toLowerCase()} com carga de ${num(c)} kW.`);
+  lines.push(`Fd = Fator de Demanda para Iluminação (parâmetro estimado/editável) = ${param(l.demandFactor??100)}%.`);
+  lines.push(`FpI (fator de potência para iluminação) = ${param(fp)}.`);
+  if(fd>=0&&fd<=1&&fp>0&&fp<=1){const demand=c*fd/fp;lines.push('Dm = (C × Fd) / FpI');lines.push(`Dm = (${num(c)} × ${param(fd)}) / ${param(fp)} = ${num(demand)} kVA.`);lines.push(`Potência reativa estimada na demanda: Q = √(Dm² − (C × Fd)²) = ${num(Math.sqrt(Math.max(0,demand**2-(c*fd)**2)))} kvar.`)}
+  else lines.push('Dm: parâmetros de demanda ou fator de potência inválidos.');
+ }
+ for(const l of others){
+  const base=powerKw(l),fp=l.powerFactor??0,eta=(l.efficiency??100)/100;
+  if(l.unit==="VA"||l.unit==="kVA"){
+   lines.push(`${l.description} (${l.quantity} × ${param(l.power)} ${l.unit}): potência aparente S = ${num(base)} kVA.`);
+   if(fp>0&&fp<=1)lines.push(`Fator de potência: ${param(fp)}; P = S × FP = ${num(base*fp)} kW; Q = S × √(1 − FP²) = ${num(base*Math.sqrt(1-fp**2))} kvar.`)
+  }else if(fp>0&&fp<=1&&eta>0&&eta<=1){const active=base/eta,apparent=active/fp;lines.push(`${l.description} (${l.quantity} × ${param(l.power)} ${l.unit}): potência ativa estimada P = ${num(base)} / ${param(eta)} = ${num(active)} kW; fator de potência ${param(fp)}; potência aparente S = P / FP = ${num(apparent)} kVA; potência reativa Q = √(S² − P²) = ${num(Math.sqrt(Math.max(0,apparent**2-active**2)))} kvar.`)}
+  else lines.push(`${l.description}: rendimento ou fator de potência não informado para cálculo de potência aparente.`)
+ }
+ return lines;
+}
+
 export function App(){
  const [p,setP]=useState<Project>(initial);
  const [editing,setEditing]=useState<string[]>([]);
@@ -102,10 +156,8 @@ export function App(){
    heading("1. IDENTIFICAÇÃO DO CONSUMIDOR"),para(`Titular: ${p.consumer||"(não informado)"}`),para(`CPF: ${p.cpf||"(não informado)"}`),para(`Endereço: ${p.address||"(não informado)"}`),
    heading("2. OBJETIVO"),para(`Este memorial apresenta a relação de cargas prevista para atendimento do consumidor identificado, por meio de fornecimento ${p.supply.toLowerCase()}.`),
    heading("3. RELAÇÃO DE CARGA INSTALADA"),heading("3.1 MOTORES"),tableFor(motor),
-   para(`Potência mecânica total: ${money(motor.reduce((a,l)=>a+l.quantity*l.power*(l.unit==="CV"?0.7355:l.unit==="HP"?0.7457:l.unit==="kW"?1:l.unit==="W"?0.001:0),0))} kW.`),
-   ...motor.map(l=>para(`${l.description} (${l.quantity} × ${money(l.power)} ${l.unit}): rendimento estimado ${l.efficiency??"—"}%; FP estimado ${l.powerFactor??"—"}.`)),
    heading("3.2 ILUMINAÇÃO"),tableFor(lights),
-   ...lights.map(l=>para(`${l.description}: ${l.quantity} × ${money(l.power)} ${l.unit}; FP estimado ${l.powerFactor??"—"}.`)),
+   ...calculationDetails(p.loads).map(para),
    heading("4. DADOS TÉCNICOS DA ENTRADA DE ENERGIA"),
    ...sectionKeys.flatMap(key=>key.startsWith("4.")?[heading(key),...sections[key].split("\n").map(para)]:[]),
    ...sectionKeys.flatMap(key=>key.startsWith("4.")?[]:[heading(key),...sections[key].split("\n").map(para)]),
@@ -129,8 +181,8 @@ export function App(){
   h("1. IDENTIFICAÇÃO DO CONSUMIDOR");line(`Titular: ${p.consumer||"(não informado)"}`);line(`CPF: ${p.cpf||"(não informado)"}`);line(`Endereço: ${p.address||"(não informado)"}`);
   h("2. OBJETIVO");line(`Este memorial apresenta a relação de cargas prevista para atendimento do consumidor identificado, por meio de fornecimento ${p.supply.toLowerCase()}.`);
   h("3. RELAÇÃO DE CARGA INSTALADA");h("3.1 MOTORES");table(groupLoads(p.loads,true));
-  for(const l of groupLoads(p.loads,true))line(`${l.description}: ${l.quantity} × ${money(l.power)} ${l.unit}; rendimento estimado ${l.efficiency??"—"}%; FP estimado ${l.powerFactor??"—"}.`);
-  h("3.2 ILUMINAÇÃO");table(groupLoads(p.loads,false));for(const l of groupLoads(p.loads,false))line(`${l.description}: ${l.quantity} × ${money(l.power)} ${l.unit}; FP estimado ${l.powerFactor??"—"}.`);
+  h("3.2 ILUMINAÇÃO");table(groupLoads(p.loads,false));
+  for(const detail of calculationDetails(p.loads))line(detail);
   h("4. DADOS TÉCNICOS DA ENTRADA DE ENERGIA");
   for(const key of sectionKeys){if(key.startsWith("4.")){h(key);for(const part of sections[key].split("\n"))line(part)}}
   for(const key of sectionKeys){if(!key.startsWith("4.")){h(key);for(const part of sections[key].split("\n"))line(part)}}
@@ -152,11 +204,12 @@ export function App(){
  <label>Tensão informada (V)<input type="number" value={p.voltage} onChange={e=>set({voltage:e.target.value})}/></label>
  <label>Responsável técnico<input value={p.professional} onChange={e=>set({professional:e.target.value})}/></label>
  <label>Registro profissional<input value={p.registration} onChange={e=>set({registration:e.target.value})}/></label></div></section>
- <section><h2>2. Cargas</h2><p>Rendimento e FP são estimativas iniciais. Clique no lápis da linha para editá-los.</p><div className="scroll"><table><thead><tr><th>Descrição</th><th>Categoria</th><th>Quantidade</th><th>Potência</th><th>Unidade</th><th>Rend. (%)</th><th>FP</th><th>Ações</th></tr></thead><tbody>{p.loads.map(l=>{
+ <section><h2>2. Cargas</h2><p>Rendimento, fator de potência e fator de demanda são parâmetros estimados/editáveis. Clique no lápis da linha para editá-los.</p><div className="scroll"><table><thead><tr><th>Descrição</th><th>Categoria</th><th>Quantidade</th><th>Potência</th><th>Unidade</th><th>Rend. (%)</th><th>FP</th><th>Fd (%)</th><th>Ações</th></tr></thead><tbody>{p.loads.map(l=>{
  const unlocked=editing.includes(l.id);
  return <tr key={l.id}><td><input value={l.description} onChange={e=>patch(l.id,{description:e.target.value})}/></td><td><input value={l.category} onChange={e=>patch(l.id,{category:e.target.value})}/></td><td><input type="number" min="1" step="1" value={l.quantity} onChange={e=>patch(l.id,{quantity:Number(e.target.value)})}/></td><td><input type="number" min="0.01" value={l.power} onChange={e=>patch(l.id,{power:Number(e.target.value)})}/></td><td><select value={l.unit} onChange={e=>patch(l.id,{unit:e.target.value as Unit})}>{(["W","kW","CV","HP","VA","kVA"] as Unit[]).map(u=><option key={u}>{u}</option>)}</select></td>
  <td><input aria-label={"Rendimento de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0.01" max="100" step="0.1" placeholder="—" disabled={!unlocked||l.efficiency===undefined} value={l.efficiency??""} onChange={e=>patch(l.id,{efficiency:Number(e.target.value)})}/></td>
  <td><input aria-label={"FP de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0.01" max="1" step="0.01" placeholder="—" disabled={!unlocked||l.powerFactor===undefined} value={l.powerFactor??""} onChange={e=>patch(l.id,{powerFactor:Number(e.target.value)})}/></td>
+ <td><input aria-label={"Fator de demanda de "+l.description} className={"parameter "+(!unlocked?"muted":"")} type="number" min="0" max="100" step="1" placeholder="—" disabled={!unlocked||l.demandFactor===undefined} value={l.demandFactor??""} onChange={e=>patch(l.id,{demandFactor:Number(e.target.value)})}/></td>
  <td><div className="actions"><button title={unlocked?"Concluir edição":"Editar parâmetros"} onClick={()=>setEditing(old=>unlocked?old.filter(id=>id!==l.id):[...old,l.id])}>{unlocked?"✓":"✎"}</button><button onClick={()=>set({loads:p.loads.filter(x=>x.id!==l.id)})}>Remover</button></div></td></tr>})}</tbody></table></div>
  <button onClick={()=>set({loads:[...p.loads,defaultParameters({id:crypto.randomUUID(),description:"Novo equipamento",category:"Outros",quantity:1,power:1,unit:"W"})]})}>+ Adicionar equipamento</button></section>
  <section><h2>3. Textos do modelo (seções 4 a 8)</h2>
