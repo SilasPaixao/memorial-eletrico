@@ -20,8 +20,8 @@ const defaults:Project={consumer:"",cpf:"",address:"",supply:"Trifásica",voltag
 {id:"2",description:"Motor elétrico",category:"Motores",quantity:4,power:1,unit:"CV"},
 {id:"3",description:"Motor elétrico",category:"Motores",quantity:2,power:5,unit:"CV"},
 {id:"4",description:"Motor elétrico",category:"Motores",quantity:4,power:2,unit:"CV"},
-{id:"5",description:"Iluminação",category:"Iluminação",quantity:10,power:50,unit:"W"}].map(l=>defaultParameters(l as Load))};
-function initial():Project {
+{id:"5",description:"Iluminação",category:"Iluminação",quantity:10,power:50,unit:"W"}].map(l => defaultParameters(l as Load))};
+ function initial():Project {
  try {
   const raw=localStorage.getItem("memorial-eletrico-v1");
   if(!raw)return defaults;
